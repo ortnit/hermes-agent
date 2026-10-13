@@ -9,6 +9,45 @@ import pytest
 from tools import browser_use_cli as bu
 
 
+def test_reap_idle_harness_daemons_stops_only_verified_idle_daemons(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in ("old", "fresh", "imposter"):
+        (runtime / f"bu-{name}.pid").write_text("123", encoding="utf-8")
+
+    monkeypatch.setattr(bu, "_harness_runtime_dir", lambda: runtime)
+    monkeypatch.setattr(
+        bu,
+        "_harness_daemon_activity_seconds",
+        lambda name: {"old": 7200.0, "fresh": 30.0, "imposter": 7200.0}[name],
+    )
+    monkeypatch.setattr(
+        bu,
+        "_verified_harness_daemon_pid",
+        lambda name: 123 if name == "old" else None,
+    )
+    stopped = []
+    monkeypatch.setattr(bu, "_stop_browser_harness_daemon", stopped.append)
+
+    assert bu.reap_idle_harness_daemons(min_idle_seconds=3600) == 1
+    assert stopped == ["old"]
+
+
+def test_reap_idle_harness_daemons_ignores_unknown_activity(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "bu-stale.pid").write_text("123", encoding="utf-8")
+
+    monkeypatch.setattr(bu, "_harness_runtime_dir", lambda: runtime)
+    monkeypatch.setattr(bu, "_harness_daemon_activity_seconds", lambda name: None)
+    monkeypatch.setattr(bu, "_verified_harness_daemon_pid", lambda name: 123)
+    stopped = []
+    monkeypatch.setattr(bu, "_stop_browser_harness_daemon", stopped.append)
+
+    assert bu.reap_idle_harness_daemons(min_idle_seconds=3600) == 0
+    assert stopped == []
+
+
 @pytest.mark.platforms("posix", "windows")
 def test_harness_runs_on_an_interpreter_without_its_own_site_packages(monkeypatch):
     """The Desktop bundle boots its store interpreter with no venv to activate (``-S`` emulates

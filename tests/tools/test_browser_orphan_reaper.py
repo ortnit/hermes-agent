@@ -503,6 +503,7 @@ class TestPeriodicOrphanReap:
 
         cycles_to_run = 21
         reap_calls = []
+        harness_reap_calls = []
         remaining = {"n": cycles_to_run}
 
         def fake_cleanup():
@@ -515,6 +516,8 @@ class TestPeriodicOrphanReap:
         try:
             with patch("tools.browser_tool_lifecycle._reap_orphaned_browser_sessions",
                        side_effect=lambda: reap_calls.append(1)), \
+                 patch("tools.browser_use_cli.reap_idle_harness_daemons",
+                       side_effect=lambda: harness_reap_calls.append(1)), \
                  patch("tools.browser_tool_lifecycle._cleanup_inactive_browser_sessions",
                        side_effect=fake_cleanup), \
                  patch("tools.browser_tool.time.sleep"):
@@ -523,3 +526,4 @@ class TestPeriodicOrphanReap:
             bt._cleanup_running = orig_running
 
         assert len(reap_calls) > 1, "startup-only reap would give exactly 1"
+        assert len(harness_reap_calls) == len(reap_calls)

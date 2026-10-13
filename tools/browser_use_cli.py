@@ -624,6 +624,111 @@ def stop_harness_daemons() -> None:
             _run_cli_killing_process_group([*cmd, "--reload"], "", {**env, "BU_NAME": name}, 15)
 
 
+def _harness_runtime_dir() -> Optional[Path]:
+    """browser-harness runtime directory, or None when the package is unavailable."""
+    try:
+        from browser_harness import paths
+        return paths.runtime_dir()
+    except Exception as exc:
+        logger.debug("browser-harness runtime dir unavailable: %s", exc)
+        return None
+
+
+def _harness_daemon_name_from_pid_file(pid_file: Path) -> Optional[str]:
+    stem = pid_file.stem
+    if stem == "bu":
+        return "default"
+    if stem.startswith("bu-"):
+        name = stem[3:]
+        return name if _SESSION_RE.match(name) else None
+    return None
+
+
+def _harness_daemon_activity_seconds(name: str) -> Optional[float]:
+    """Seconds since the harness daemon last touched its endpoint or log.
+
+    ``browser-harness`` rewrites its IPC endpoints and log through its own path
+    helpers. Treat unreadable activity as unknown and therefore not reapable.
+    """
+    try:
+        from browser_harness import _ipc as ipc
+        candidates = [ipc.pid_path(name), ipc.port_path(name), ipc.log_path(name)]
+        with contextlib.suppress(Exception):
+            candidates.append(ipc._sock_path(name))  # POSIX socket path; private but stable in this package.
+        mtimes = [p.stat().st_mtime for p in candidates if p.exists()]
+        if not mtimes:
+            return None
+        return max(0.0, time.time() - max(mtimes))
+    except Exception as exc:
+        logger.debug("browser-harness activity lookup failed for %s: %s", name, exc)
+        return None
+
+
+def _verified_harness_daemon_pid(name: str) -> Optional[int]:
+    """Return the live browser-harness daemon PID after IPC + cmdline identity checks."""
+    try:
+        from browser_harness import _ipc as ipc
+        pid = ipc.identify(name, timeout=1.0)
+        if pid is None:
+            return None
+        import psutil
+        argv = psutil.Process(pid).cmdline() or []
+        cmdline = " ".join(argv)
+        if "browser_harness.daemon" not in cmdline:
+            logger.warning("Refusing to reap browser-harness daemon %s PID %s: unexpected cmdline", name, pid)
+            return None
+        return pid
+    except Exception as exc:
+        logger.debug("browser-harness identity lookup failed for %s: %s", name, exc)
+        return None
+
+
+def _stop_browser_harness_daemon(name: str) -> None:
+    from browser_harness.admin import restart_daemon
+    restart_daemon(name, require_clean=False)
+
+
+def reap_idle_harness_daemons(min_idle_seconds: Optional[float] = None) -> int:
+    """Stop stale ``browser_harness.daemon`` processes through harness IPC.
+
+    This is a backstop for daemon processes that outlive the Hermes session or
+    fall out of per-process ``_driven_daemons`` tracking. It never trusts the
+    pid file alone: a candidate must be idle past the orphan grace window and
+    must identify over the harness IPC before its clean shutdown path is used.
+    """
+    runtime = _harness_runtime_dir()
+    if runtime is None:
+        return 0
+    try:
+        pid_files = list(runtime.glob("bu*.pid"))
+    except OSError:
+        return 0
+    try:
+        from tools.browser_tool import BROWSER_ORPHAN_GRACE_SECONDS
+        threshold = BROWSER_ORPHAN_GRACE_SECONDS if min_idle_seconds is None else float(min_idle_seconds)
+    except Exception:
+        threshold = 3600.0 if min_idle_seconds is None else float(min_idle_seconds)
+
+    stopped = 0
+    for pid_file in pid_files:
+        name = _harness_daemon_name_from_pid_file(pid_file)
+        if not name:
+            continue
+        idle_s = _harness_daemon_activity_seconds(name)
+        if idle_s is None or idle_s < threshold:
+            continue
+        if _verified_harness_daemon_pid(name) is None:
+            continue
+        try:
+            _stop_browser_harness_daemon(name)
+            stopped += 1
+        except Exception as exc:
+            logger.debug("browser-harness daemon stop failed for %s: %s", name, exc)
+    if stopped:
+        logger.info("Stopped %d idle browser-harness daemon(s)", stopped)
+    return stopped
+
+
 def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT_S,
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
